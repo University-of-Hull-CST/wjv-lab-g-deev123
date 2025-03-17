@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use std::time::Instant;
 use std::sync::Arc;
+use std::sync::Mutex;
 //use std::rc::Rc;
 
 const NUM_OF_THREADS: usize = 5;
@@ -51,8 +52,8 @@ impl Particle
 
 struct ParticleSystem
 {
-    // moved: bool,
     particles: Vec<Particle>,
+    collisions: Arc<Mutex<i32>>,
 }
 impl ParticleSystem
 {
@@ -65,7 +66,7 @@ impl ParticleSystem
             let new_particle = Particle::new(rand::random::<f32>() * 10.0, rand::random::<f32>() * 10.0);
             particles_vec.push(new_particle);
         }
-        return Self{particles: particles_vec};
+        return Self{particles: particles_vec, collisions: Arc::new(Mutex::new(0))};
         
     
     }
@@ -78,10 +79,6 @@ impl ParticleSystem
         }
     }
 
-    fn check_collisions()
-    {
-
-    }
 
     fn move_loop_10s(&mut self)
     {
@@ -92,6 +89,98 @@ impl ParticleSystem
         }
         println!("Time elapsed {:?}", start.elapsed());
     }
+
+
+    fn thread_main (list: &mut [Particle])
+    {
+        for i in &mut *list
+        {   
+            i.move_by(rand::random::<f32>() - 0.5, rand::random::<f32>() - 0.5);
+        }
+        
+    }
+
+    fn check_collisions(list: &[Particle], whole_list: &Vec<Particle>, count: &Arc<Mutex<i32>>) -> i32
+    {
+        let mut collisions: i32 = 0;
+        for p1 in list
+        {
+            for p2 in whole_list
+            {
+                // prevent colliding with itself
+                if p1.collide(p2)
+                {
+                    collisions += 1;
+                }
+            }
+        }
+
+        // remove collisons with self which is just the number of paricles in list
+        collisions -= list.len() as i32;
+        
+        {
+            let mut num = count.lock().unwrap();
+            *num += collisions;
+        }
+
+        println!("{} collisions in thread", collisions);
+        return collisions;
+    }
+
+
+    fn run(&mut self)
+    {
+        let start = Instant::now();
+        println!("x:{}, y:{}", self.particles[0].x, self.particles[0].y);
+        //particle_system.move_loop_10s();
+        
+        let mut pool = scoped_threadpool::Pool::new(NUM_OF_THREADS as u32);
+
+        for _i in 0..3
+        {
+        
+            pool.scoped(|scope|
+                {
+                    for slice in self.particles.chunks_mut(PARTICLES_PER_THREAD)
+                    {
+                        scope.execute(move || Self::thread_main(slice));
+                    }
+                });
+                // join is automatic
+
+
+
+            // could be a reference counter too?
+            // just sharing the particles list between threads
+            let whole_list = Arc::new(self.particles.clone());
+
+            // then check collisions:
+            pool.scoped(|scope|
+                {
+                    for slice in self.particles.chunks(PARTICLES_PER_THREAD)
+                    {
+                        let cloned_list = Arc::clone(&whole_list);
+                        let col = Arc::clone(&(self.collisions));
+                        scope.execute(move || {Self::check_collisions(slice, &cloned_list, &col);});
+                    }
+                });
+                
+            
+
+        }
+
+        {
+            let num = self.collisions.lock().unwrap();
+            
+            println!("{} total collisions", num);
+        }
+        println!("Simulation finished");
+        println!("x:{}, y:{}", self.particles[0].x, self.particles[0].y);
+        println!("Particles:{}, Threads:{}, Particles per thread:{}", NUM_OF_PARTICLES, NUM_OF_THREADS, PARTICLES_PER_THREAD);
+        println!("Total time elapsed {:?}", start.elapsed());
+    }
+
+
 }
 
 // fn thread_main (list: &mut [Particle])
@@ -110,14 +199,7 @@ impl ParticleSystem
 // }
 
 // new thread main
-fn thread_main (list: &mut [Particle])
-{
-    for i in &mut *list
-    {   
-        i.move_by(rand::random::<f32>() - 0.5, rand::random::<f32>() - 0.5);
-    }
-    
-}
+
 
 
 
@@ -128,73 +210,13 @@ fn thread_main (list: &mut [Particle])
 
 
 
-fn check_collisions(list: &[Particle], whole_list: &Vec<Particle>) -> i32
-{
-    let mut collisions: i32 = 0;
-    for p1 in list
-    {
-        for p2 in whole_list
-        {
-            // prevent colliding with itself
-            if p1.collide(p2)
-            {
-                collisions += 1;
-            }
-        }
-    }
 
-    // remove collisons with self which is just the number of paricles in list
-    collisions -= list.len() as i32;
-
-    println!("{} collisions in thread", collisions);
-    return collisions;
-}
 
 fn main()
 {
-    let start = Instant::now();
+    
     let mut particle_system = ParticleSystem::new();
     
-    println!("x:{}, y:{}", particle_system.particles[0].x, particle_system.particles[0].y);
-    //particle_system.move_loop_10s();
-    
-    let mut pool = scoped_threadpool::Pool::new(NUM_OF_THREADS as u32);
-
-    for _i in 0..3
-    {
-    
-        pool.scoped(|scope|
-            {
-                for slice in particle_system.particles.chunks_mut(PARTICLES_PER_THREAD)
-                {
-                    scope.execute(move || thread_main(slice));
-                }
-            });
-            // join is automatic
-
-
-
-        // could be a reference counter too?
-        // just sharing the particles list between threads
-        let whole_list = Arc::new(particle_system.particles.clone());
-
-        // then check collisions:
-        pool.scoped(|scope|
-            {
-                for slice in particle_system.particles.chunks(PARTICLES_PER_THREAD)
-                {
-                    let cloned_list = Arc::clone(&whole_list);
-                    scope.execute(move || {check_collisions(slice, &cloned_list);});
-                }
-            });
-            
-        
-
-    }
-
-    println!("Simulation finished");
-    println!("x:{}, y:{}", particle_system.particles[0].x, particle_system.particles[0].y);
-    println!("Particles:{}, Threads:{}, Particles per thread:{}", NUM_OF_PARTICLES, NUM_OF_THREADS, PARTICLES_PER_THREAD);
-    println!("Total time elapsed {:?}", start.elapsed());
+    particle_system.run();
 
 }
